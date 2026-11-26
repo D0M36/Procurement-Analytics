@@ -116,7 +116,7 @@ except Exception:
 key=hashlib.sha256(raw).hexdigest()
 if st.session_state.get('dataset')!=key:
     st.session_state.dataset=key; st.session_state.maps=mappings(x)
-page=st.sidebar.radio('Workspace',['Overview','Spend cube','Supplier analysis','Trade concentration','Facility overlap','Spend trends','Transactions','Mappings & data quality'])
+page=st.sidebar.radio('Workspace',['Overview','Spend cube','Supplier analysis','Trade concentration','Facility overlap','Spend trends','Rebate analysis','Transactions','Mappings & data quality'])
 v,b,t=st.session_state.maps
 if page=='Mappings & data quality':
     st.subheader('Editable mapping tables'); st.caption('ABN matches and branch state assignments are provisional. Confirm combined regions and factory definitions. Changes persist only in this session; export to reuse.')
@@ -137,14 +137,27 @@ d['Supplier label']=d['Supplier']+' ['+d['Entity ID']+']'; d['Month']=d['Posting
 with st.sidebar:
     st.header('Global filters'); group=st.radio('Supplier grouping',['Proposed entity (ABN)','Original vendor ID']);
     if group=='Original vendor ID': d['Supplier label']=d['Vendor Name']+' ['+d['Vendor No.']+']'
-    valid=d['Posting Date'].dropna(); dates=st.date_input('Posting date range',(valid.min().date(),valid.max().date())) if len(valid) else ()
-    if len(dates)==2: d=d[d['Posting Date'].dt.date.between(*dates)]
+    national=d.copy()
+    if page!='Rebate analysis':
+        valid=d['Posting Date'].dropna()
+        if len(valid):
+            from datetime import date
+            lo,hi=valid.min().date(),valid.max().date()
+            default=(max(lo,date(2025,1,1)),min(hi,date(2026,1,1)))
+            if default[0]>default[1]: default=(lo,hi+pd.Timedelta(days=1))
+            dates=st.date_input('Posting date range (end exclusive)',default,min_value=lo,max_value=hi+pd.Timedelta(days=1),key='date-general-v3')
+            if len(dates)==2: d=d[d['Posting Date'].ge(pd.Timestamp(dates[0]))&d['Posting Date'].lt(pd.Timestamp(dates[1]))]
+    else: st.caption('Rebate analysis uses its own baseline date controls.')
     for c in ['State','Facility type','Facility','Trade category','Vendor type','Department Code','Supplier label']:
         opts=sorted(d[c].dropna().unique()); sel=st.multiselect(c,opts)
         if sel: d=d[d[c].isin(sel)]
     term=st.text_input('Search descriptions / supplier')
     if term: d=d[d[['Description','Description 2','Supplier label']].fillna('').apply(lambda s:s.str.contains(term,case=False,regex=False)).any(axis=1)]
 st.caption('Net transaction amount excluding GST • Credits retained • Combined sales regions remain separate • ABN grouping is provisional')
+if page=='Rebate analysis':
+    from rebate import render_rebate
+    render_rebate(d,national,key,display_table,csv)
+    st.stop()
 a=agg(d,['Supplier label']); total=d.Amount.sum(); positive=a[a.Spend>0]; den=positive.Spend.sum()
 k=st.columns(4); k[0].metric('Net spend',money(total)); k[1].metric('Suppliers',f'{len(a):,}'); k[2].metric('Transaction lines',f'{len(d):,}'); k[3].metric('Top 5 share (positive supplier net spend)',f'{positive.head(5).Spend.sum()/den:.1%}' if den else 'N/A')
 if d.empty: st.warning('No transactions match these filters.'); st.stop()
