@@ -1,24 +1,18 @@
-# Extolla Procurement Analytics — V1
+# Ausco Procurement Analytics V2
+Replace app.py, requirements.txt and .gitignore in your existing app repository. Do not commit the original workbook or secrets to a public repository.
 
-Private, upload-driven Streamlit application. No client workbook is included in this repository. Tested source schema: Subcontractor spend by branch.xlsx, headers on Excel row 11. The loader detects the header automatically.
+## Automatic workbook loading on Streamlit Cloud
+1. Create a separate **private** GitHub repository named `Ausco-Data` (only if approved for the client data). Upload `Subcontractor spend by branch.xlsx` there, at the root. Verify the repository is private.
+2. Create a fine-grained GitHub personal access token restricted to Ausco-Data, with Contents read-only permission and an expiry. Do not share it or commit it.
+3. In the Streamlit app settings, open Secrets and enter the following (replace placeholders):
 
-## Run locally
-
-```bash
-python -m pip install -r requirements.txt
-python -m streamlit run app.py
+```toml
+APP_PASSWORD = "Ausco11"
+DATA_REPO = "YOUR-GITHUB-USERNAME/Ausco-Data"
+DATA_PATH = "Subcontractor spend by branch.xlsx"
+DATA_TOKEN = "YOUR-READ-ONLY-TOKEN"
 ```
 
-## Deploy
-Create a private GitHub repository, upload these files (including .gitignore), then create a Streamlit app from that repository with app.py as entry point. Verify private access and your company's approval before uploading client data to any hosting service. Local execution is preferable for confidential data if hosting is not approved.
+Save and reboot the app. The login appears before the workbook is fetched; after login, the original data loads automatically. An optional replacement uploader remains available. For local hosting, put the workbook under `data/` beside app.py and set APP_PASSWORD in `.streamlit/secrets.toml` instead. The public code package does not include the workbook or password. The requested shared password is weak and should be changed before production use; a private app with individual authentication is preferable. Verify client cloud-hosting permission and access controls before using real data.
 
-## Use
-Upload the original workbook. Filter by date, region, facility, facility type, trade, department and supplier. Use the cube to choose row dimensions and pivot columns. Supplier analysis drills into purchase descriptions; concentration and overlap have CSV exports. Mapping changes apply to the entire session. Export mapping CSVs and restore them on the same source dataset as needed. New datasets with changed mapping keys require reconciliation before restore.
-
-## Assumptions and limitations
-- Transaction Amount is the ex-GST spend basis. Negative entries and potential duplicate transaction lines are retained. Repeated vendor-level totals are not summed.
-- Default entity grouping uses matching 11-digit ABNs where a vendor ID has one ABN; this is provisional, not ABN registry verification. Switch to original vendor IDs for reconciliation. Names are display labels, not legal entity verification.
-- Geography is inferred from branch codes and names. Combined sales territories remain distinct; factory classification is based on branch names. Confirm mappings with client.
-- Trade classification comes from source Trade, not vendor-level inference. GL code is absent; Department Code is not GL.
-- No database, AI service, authentication implementation or automatic persistent storage in V1. Session mappings can be exported and restored manually. CSV exports exclude contact email, address and phone.
-- Fiscal year ends June 30. Incomplete periods are not annualised. Supplier concentration uses positive net balances only.
+Numeric tables use centered numeric columns with locale-aware thousands separators and percentage formatting for share columns. CSV exports retain raw numeric values (shares are fractions for calculation). Mapping changes remain session-only. Syntax checked; live Streamlit deployment and browser rendering not tested.

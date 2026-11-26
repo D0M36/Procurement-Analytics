@@ -5,3 +5,8 @@
 .streamlit/secrets.toml
 __pycache__/
 .venv/
+
+.streamlit/secrets.toml
+data/
+*.xlsx
+*.csv

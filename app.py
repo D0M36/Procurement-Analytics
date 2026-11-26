@@ -1,11 +1,47 @@
-import io, re, hashlib
+import io, re, hashlib, hmac, time
+from pathlib import Path
+import requests
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-st.set_page_config(page_title='Extolla | Procurement Analytics',layout='wide')
+st.set_page_config(page_title='Ausco Procurement Analytics',layout='wide')
 st.markdown('''<style>.block-container{padding-top:2rem} [data-testid="stMetric"]{background:rgba(120,140,150,.08);padding:16px;border-radius:8px} </style>''',unsafe_allow_html=True)
-st.title('Extolla | Procurement Analytics')
+st.title('Ausco Procurement Analytics')
+def secret(name, default=''):
+    try: return st.secrets.get(name, default)
+    except FileNotFoundError: return default
+
+def login():
+    expected = secret('APP_PASSWORD')
+    if not expected:
+        st.error('Administrator must configure APP_PASSWORD in Streamlit Secrets.'); st.stop()
+    if not st.session_state.get('authenticated'):
+        st.caption('Authorised access only')
+        with st.form('login'):
+            password = st.text_input('Password', type='password')
+            submitted = st.form_submit_button('Sign in')
+        if submitted:
+            if hmac.compare_digest(password.encode(), str(expected).encode()):
+                st.session_state.authenticated = True; st.rerun()
+            else:
+                time.sleep(2); st.error('Incorrect password.')
+        st.stop()
+    if st.sidebar.button('Sign out'):
+        st.session_state.clear(); st.rerun()
+login()
 st.caption('Spend intelligence • Supplier strategy • Manufacturing network')
+
+def numeric_config(df):
+    config = {}
+    for c in df.select_dtypes(include='number').columns:
+        name = str(c)
+        fmt = 'percent' if 'share' in name.lower() else 'localized'
+        config[c] = st.column_config.NumberColumn(format=fmt, alignment='center')
+    return config
+
+def display_table(df, **kwargs):
+    st.dataframe(df, column_config=numeric_config(df), **kwargs)
+
 U='Unmapped'
 def clean(s): return s.fillna('').astype(str).str.strip().str.replace(r'\.0$','',regex=True)
 @st.cache_data
@@ -53,12 +89,30 @@ def money(v): return f'${v:,.0f}'
 def agg(d,cols): return d.groupby(cols,dropna=False)['Amount'].sum().reset_index(name='Spend').sort_values('Spend',ascending=False)
 def bar(d,c,title):
     st.plotly_chart(px.bar(d.head(20).sort_values('Spend'),x='Spend',y=c,orientation='h',title=title,template='plotly_white',color_discrete_sequence=['#167D83']),use_container_width=True)
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_private(repo, path, token):
+    from urllib.parse import quote
+    url = f'https://api.github.com/repos/{repo}/contents/{quote(path, safe="/")}'
+    response = requests.get(url, headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github.raw+json', 'X-GitHub-Api-Version': '2022-11-28'}, timeout=60)
+    response.raise_for_status()
+    return response.content
 with st.sidebar:
-    st.header('Project data'); f=st.file_uploader('Upload transaction workbook',type=['xlsx','csv']); st.caption('Files are processed in this session. Do not commit client data to GitHub.')
-if not f:
-    st.info('Upload Subcontractor spend by branch.xlsx to begin.'); st.stop()
-try: raw=f.getvalue(); x=load(raw,f.name)
-except Exception as e: st.error(str(e)); st.stop()
+    st.header('Project data')
+    f=st.file_uploader('Replace workbook (optional)',type=['xlsx','csv'])
+    st.caption('Default workbook loads automatically after login.')
+try:
+    local = Path(__file__).parent / 'data' / 'Subcontractor spend by branch.xlsx'
+    if f: raw, name = f.getvalue(), f.name
+    elif local.is_file(): raw, name = local.read_bytes(), local.name
+    elif secret('DATA_REPO') and secret('DATA_TOKEN'):
+        name = secret('DATA_PATH', 'Subcontractor spend by branch.xlsx')
+        with st.spinner('Loading private workbook…'):
+            raw = fetch_private(secret('DATA_REPO'), name, secret('DATA_TOKEN'))
+    else:
+        st.info('Configure the private default workbook in Streamlit Secrets, or upload a test workbook.'); st.stop()
+    x=load(raw,name)
+except Exception:
+    st.error('Could not load workbook. Check private repository, token permissions, file path and workbook format.'); st.stop()
 key=hashlib.sha256(raw).hexdigest()
 if st.session_state.get('dataset')!=key:
     st.session_state.dataset=key; st.session_state.maps=mappings(x)
@@ -68,7 +122,7 @@ if page=='Mappings & data quality':
     st.subheader('Editable mapping tables'); st.caption('ABN matches and branch state assignments are provisional. Confirm combined regions and factory definitions. Changes persist only in this session; export to reuse.')
     for i,(name,frame,keys) in enumerate(zip(['Vendor master','Branch / facility','Trade classification'],[v,b,t],[['Vendor No.'],['Branch Code','Branch'],['Trade']])):
         with st.expander(name,expanded=i==0):
-            edited=st.data_editor(frame,key=f'edit-{key}-{i}',disabled=keys,use_container_width=True,hide_index=True)
+            edited=st.data_editor(frame,column_config=numeric_config(frame),key=f'edit-{key}-{i}',disabled=keys,use_container_width=True,hide_index=True)
             st.download_button('Export mapping',csv(edited),f'mapping_{i}.csv',key=f'dl{i}')
             upload=st.file_uploader('Restore mapping CSV',type=['csv'],key=f'map{i}')
             if st.button('Apply changes',key=f'apply{i}'):
@@ -92,7 +146,7 @@ with st.sidebar:
     if term: d=d[d[['Description','Description 2','Supplier label']].fillna('').apply(lambda s:s.str.contains(term,case=False,regex=False)).any(axis=1)]
 st.caption('Net transaction amount excluding GST • Credits retained • Combined sales regions remain separate • ABN grouping is provisional')
 a=agg(d,['Supplier label']); total=d.Amount.sum(); positive=a[a.Spend>0]; den=positive.Spend.sum()
-k=st.columns(4); k[0].metric('Net spend',money(total)); k[1].metric('Suppliers',len(a)); k[2].metric('Transaction lines',f'{len(d):,}'); k[3].metric('Top 5 share (positive supplier net spend)',f'{positive.head(5).Spend.sum()/den:.1%}' if den else 'N/A')
+k=st.columns(4); k[0].metric('Net spend',money(total)); k[1].metric('Suppliers',f'{len(a):,}'); k[2].metric('Transaction lines',f'{len(d):,}'); k[3].metric('Top 5 share (positive supplier net spend)',f'{positive.head(5).Spend.sum()/den:.1%}' if den else 'N/A')
 if d.empty: st.warning('No transactions match these filters.'); st.stop()
 if page=='Overview':
     l,r=st.columns(2)
@@ -104,21 +158,21 @@ elif page=='Spend cube':
     c1,c2=st.columns(2); rows=c1.multiselect('Group by',dims,default=['Trade category','Supplier label']); cols=c2.selectbox('Pivot columns',['None']+[c for c in dims if c not in rows]);
     if rows:
         out=agg(d,rows) if cols=='None' else pd.pivot_table(d,index=rows,columns=cols,values='Amount',aggfunc='sum',fill_value=0).reset_index()
-        st.dataframe(out,use_container_width=True,hide_index=True); st.download_button('Export cube',csv(out),'spend_cube.csv')
+        display_table(out,use_container_width=True,hide_index=True); st.download_button('Export cube',csv(out),'spend_cube.csv')
     else: st.info('Select a grouping dimension.')
 elif page=='Supplier analysis':
-    a['Net spend share']=a.Spend/total if total else 0; st.dataframe(a,use_container_width=True,hide_index=True); st.download_button('Export supplier ranking',csv(a),'suppliers.csv'); sup=st.selectbox('Drill into supplier',a['Supplier label']); q=d[d['Supplier label']==sup]; l,r=st.columns(2)
+    a['Net spend share']=a.Spend/total if total else 0; display_table(a,use_container_width=True,hide_index=True); st.download_button('Export supplier ranking',csv(a),'suppliers.csv'); sup=st.selectbox('Drill into supplier',a['Supplier label']); q=d[d['Supplier label']==sup]; l,r=st.columns(2)
     with l: bar(agg(q,['Facility']),'Facility','Facility spend')
     with r: bar(agg(q,['Description']),'Description','What is purchased')
-    st.plotly_chart(px.line(agg(q,['Month']).sort_values('Month'),x='Month',y='Spend',markers=True),use_container_width=True); st.dataframe(q[['Posting Date','Document No.','Trade category','Facility','Description','Description 2','Amount']],hide_index=True,use_container_width=True)
+    st.plotly_chart(px.line(agg(q,['Month']).sort_values('Month'),x='Month',y='Spend',markers=True),use_container_width=True); display_table(q[['Posting Date','Document No.','Trade category','Facility','Description','Description 2','Amount']],hide_index=True,use_container_width=True)
 elif page=='Trade concentration':
     summary=[]
     for trade,q in d.groupby('Trade category'):
         z=agg(q,['Supplier label']); z=z[z.Spend>0]; base=z.Spend.sum(); share=z.Spend/base if base else z.Spend; summary.append({'Trade':trade,'Net spend':q.Amount.sum(),'Suppliers':q['Supplier label'].nunique(),'Top 1 share':share.head(1).sum(),'Top 5 share':share.head(5).sum(),'Suppliers to 80%':min(len(z),int((share.cumsum()<0.8).sum()+1)) if len(z) else 0,'HHI':(share**2).sum()*10000})
-    st.caption('Concentration uses positive net supplier balances within each trade; negative-only suppliers are excluded from the concentration denominator.'); out=pd.DataFrame(summary); st.dataframe(out,hide_index=True,use_container_width=True); st.download_button('Export concentration',csv(out),'concentration.csv'); tr=st.selectbox('Trade Pareto',sorted(d['Trade category'].unique())); z=agg(d[d['Trade category']==tr],['Supplier label']); z=z[z.Spend>0].copy(); z['Cumulative share']=z.Spend.cumsum()/z.Spend.sum(); z['Rank']=range(1,len(z)+1); st.plotly_chart(px.line(z,x='Rank',y='Cumulative share',hover_data=['Supplier label','Spend'],markers=True),use_container_width=True)
+    st.caption('Concentration uses positive net supplier balances within each trade; negative-only suppliers are excluded from the concentration denominator.'); out=pd.DataFrame(summary); display_table(out,hide_index=True,use_container_width=True); st.download_button('Export concentration',csv(out),'concentration.csv'); tr=st.selectbox('Trade Pareto',sorted(d['Trade category'].unique())); z=agg(d[d['Trade category']==tr],['Supplier label']); z=z[z.Spend>0].copy(); z['Cumulative share']=z.Spend.cumsum()/z.Spend.sum(); z['Rank']=range(1,len(z)+1); st.plotly_chart(px.line(z,x='Rank',y='Cumulative share',hover_data=['Supplier label','Spend'],markers=True).update_yaxes(tickformat='.0%'),use_container_width=True)
 elif page=='Facility overlap':
-    dimension=st.radio('Compare across',['Facility','State'],horizontal=True); matrix=pd.pivot_table(d,index='Supplier label',columns=dimension,values='Amount',aggfunc='sum',fill_value=0); counts=d.groupby('Supplier label')[dimension].nunique(); matrix.insert(0,'Locations used',counts); matrix.insert(1,'Total net spend',a.set_index('Supplier label').Spend); matrix=matrix.sort_values('Total net spend',ascending=False); only=st.checkbox('Only suppliers used in multiple locations',value=True); matrix=matrix[matrix['Locations used']>1] if only else matrix; st.dataframe(matrix,use_container_width=True); st.download_button('Export overlap',csv(matrix.reset_index()),'overlap.csv'); st.caption('Location count uses transaction presence, including locations whose net amount is zero.')
+    dimension=st.radio('Compare across',['Facility','State'],horizontal=True); matrix=pd.pivot_table(d,index='Supplier label',columns=dimension,values='Amount',aggfunc='sum',fill_value=0); counts=d.groupby('Supplier label')[dimension].nunique(); matrix.insert(0,'Locations used',counts); matrix.insert(1,'Total net spend',a.set_index('Supplier label').Spend); matrix=matrix.sort_values('Total net spend',ascending=False); only=st.checkbox('Only suppliers used in multiple locations',value=True); matrix=matrix[matrix['Locations used']>1] if only else matrix; display_table(matrix,use_container_width=True); st.download_button('Export overlap',csv(matrix.reset_index()),'overlap.csv'); st.caption('Location count uses transaction presence, including locations whose net amount is zero.')
 elif page=='Spend trends':
-    period=st.radio('Period',['Month','FY'],horizontal=True); dim=st.selectbox('Breakdown',['Trade category','State','Facility','Supplier label']); z=agg(d,[period,dim]).sort_values(period); top=z.groupby(dim).Spend.sum().nlargest(12).index; st.plotly_chart(px.line(z[z[dim].isin(top)],x=period,y='Spend',color=dim,markers=True),use_container_width=True); st.caption('Top 12 series shown; all groups in export. Partial periods are not annualised.'); st.dataframe(z,hide_index=True,use_container_width=True); st.download_button('Export trends',csv(z),'trends.csv')
+    period=st.radio('Period',['Month','FY'],horizontal=True); dim=st.selectbox('Breakdown',['Trade category','State','Facility','Supplier label']); z=agg(d,[period,dim]).sort_values(period); top=z.groupby(dim).Spend.sum().nlargest(12).index; st.plotly_chart(px.line(z[z[dim].isin(top)],x=period,y='Spend',color=dim,markers=True),use_container_width=True); st.caption('Top 12 series shown; all groups in export. Partial periods are not annualised.'); display_table(z,hide_index=True,use_container_width=True); st.download_button('Export trends',csv(z),'trends.csv')
 else:
-    fields=['Posting Date','Vendor No.','Supplier label','State','Facility','Trade category','Department Code','Document No.','Order No.','Description','Description 2','Quantity','UOM','Direct Unit Cost','Amount','Payment Terms','Blocked Vendor']; out=d[[c for c in fields if c in d]].sort_values('Posting Date',ascending=False); st.dataframe(out,use_container_width=True,hide_index=True); st.download_button('Export transactions',csv(out),'transactions.csv')
+    fields=['Posting Date','Vendor No.','Supplier label','State','Facility','Trade category','Department Code','Document No.','Order No.','Description','Description 2','Quantity','UOM','Direct Unit Cost','Amount','Payment Terms','Blocked Vendor']; out=d[[c for c in fields if c in d]].sort_values('Posting Date',ascending=False); display_table(out,use_container_width=True,hide_index=True); st.download_button('Export transactions',csv(out),'transactions.csv')
